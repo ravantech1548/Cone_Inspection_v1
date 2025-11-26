@@ -1,0 +1,12 @@
+fastmcp>=0.1.0
+ultralytics>=8.0.0
+pillow>=10.0.0
+# Note: torch and torchvision should be installed separately on Windows
+# Run: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# Or use: .\fix-pytorch-windows.ps1
+# torch>=2.0.0
+# torchvision>=0.15.0
+flask>=3.0.0
+flask-cors>=4.0.0
+
+python-dotenv==1.0.0

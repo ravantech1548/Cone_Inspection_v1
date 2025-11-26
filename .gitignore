@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.log
+coverage/
+.DS_Store
+uploads/
+*.pem
+*.key
+venv/
+
+# SS
+L Certificates
+certs/
+*.pem
+*.pfx
+*.key
+*.crt
+*.cert

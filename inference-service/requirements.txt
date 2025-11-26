@@ -1,0 +1,14 @@
+fastmcp>=0.1.0
+ultralytics>=8.0.0
+pillow>=10.0.0
+# PyTorch: Use CPU version for Windows compatibility
+# Install with: pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cpu
+torch==2.0.1
+torchvision==0.15.2
+torchaudio==2.0.2
+# NumPy: Must be <2 for compatibility with PyTorch 2.0.1
+numpy<2
+flask>=3.0.0
+flask-cors>=4.0.0
+
+python-dotenv==1.0.0
