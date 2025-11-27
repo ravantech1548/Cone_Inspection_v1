@@ -1,0 +1,21 @@
+PS C:\Cone_Inspection-main> npm run dev:backend
+
+PS C:\Cone_Inspection-main> cd .\inference-service\
+ C:\Cone_Inspection-main\inference-service> .\venv\Scripts\activate
+(venv) PS C:\Cone_Inspection-main\inference-service> python.exe .\http_server.py
+
+
+
+
+PS C:\Cone_Inspection-main> npm run dev:frontend
+
+
+ $ lsusb
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 001 Device 002: ID 05a3:9331 ARC International Camera
+Bus 001 Device 003: ID c0f4:05f5 Usb KeyBoard Usb KeyBoard
+Bus 002 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+Bus 003 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 003 Device 002: ID 10c4:8108 Silicon Labs USB OPTICAL MOUSE
+Bus 004 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+admin@raspberrypi:~ $ sudo apt install fswebcam
