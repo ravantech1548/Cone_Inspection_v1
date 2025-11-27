@@ -8,49 +8,98 @@ const InspectionPage = () => {
   const [selectedGoodClass, setSelectedGoodClass] = useState(null);
   const [mode, setMode] = useState('select'); // 'select', 'camera', 'upload'
   const [stream, setStream] = useState(null);
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [availableCameras, setAvailableCameras] = useState([]);
+  const [selectedCameraId, setSelectedCameraId] = useState('');
   const [capturedImage, setCapturedImage] = useState(null);
   const [classifying, setClassifying] = useState(false);
   const [result, setResult] = useState(null);
   const [batchResults, setBatchResults] = useState([]);
   const [currentBatchId, setCurrentBatchId] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [useCanvasPreview, setUseCanvasPreview] = useState(false);
   
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const previewCanvasRef = useRef(null);
+  const readinessTimeoutRef = useRef(null);
+  const previewAnimationRef = useRef(null);
+  const imageCaptureRef = useRef(null);
+  
   const navigate = useNavigate();
 
+  // --- INITIALIZATION ---
   useEffect(() => {
     loadReferences();
     return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
+      stopCamera(); // Cleanup on unmount
     };
   }, []);
 
+  // --- MODE SWITCHING ---
   useEffect(() => {
     if (mode === 'camera' && selectedGoodClass && !stream) {
-      startCamera();
+      console.debug('[Camera] Mode switched to camera. Starting camera...');
+      startCamera(selectedCameraId);
+    } else if (mode !== 'camera') {
+      console.debug('[Camera] Mode switched to', mode, 'stopping camera.');
+      stopCamera();
     }
   }, [mode, selectedGoodClass]);
+
+  // --- CAMERA SELECTION CHANGE ---
+  useEffect(() => {
+    if (mode === 'camera' && selectedGoodClass && selectedCameraId && stream) {
+      // Only restart if we already have a stream running to avoid double-init
+      console.debug('[Camera] Selected camera changed to', selectedCameraId, '- restarting stream');
+      startCamera(selectedCameraId, true);
+    }
+  }, [selectedCameraId]);
+
+  // --- CRITICAL FIX: HANDLE STREAM ATTACHMENT ---
+  // This effect runs whenever 'stream' or 'useCanvasPreview' changes.
+  // It ensures the video element exists before we try to attach the stream.
+  useEffect(() => {
+    if (!stream) return;
+
+    if (!useCanvasPreview && videoRef.current) {
+      // STANDARD VIDEO MODE
+      console.debug('[Camera] Attaching stream to video element');
+      const videoEl = videoRef.current;
+      videoEl.srcObject = stream;
+      
+      videoEl.play()
+        .then(() => {
+            console.debug('[Camera] Video playing successfully');
+            markCameraReady();
+        })
+        .catch(err => {
+            console.error('[Camera] Play error:', err);
+            // If standard video fails, try the fallback
+            setCameraError('Video play failed. Attempting snapshot mode...');
+            setUseCanvasPreview(true); 
+        });
+
+    } else if (useCanvasPreview && previewCanvasRef.current) {
+      // SNAPSHOT FALLBACK MODE
+      // We start the custom drawing loop here
+      startSnapshotLoop(stream);
+    }
+
+  }, [stream, useCanvasPreview]);
 
   const loadReferences = async () => {
     try {
       setLoading(true);
-      
-      // Get model classes from YOLO model
       const modelData = await api.get('/model/classes').catch(() => ({ classes: [] }));
       const modelClasses = modelData.classes || [];
-      
-      // Get uploaded reference images (use /list endpoint accessible to all authenticated users)
       const refData = await api.get('/references/list').catch(() => ({ references: [] }));
       const uploadedRefs = refData.references || [];
       
-      // Create reference list with model classes
       const classSamples = modelClasses.map(className => {
-        // Find first uploaded image for this class
         const uploadedRef = uploadedRefs.find(ref => ref.class === className);
-        
         return {
           class: className,
           filename: uploadedRef?.filename || null,
@@ -58,7 +107,6 @@ const InspectionPage = () => {
           hasImage: !!uploadedRef
         };
       });
-      
       setReferences(classSamples);
     } catch (error) {
       console.error('Failed to load references:', error);
@@ -68,12 +116,75 @@ const InspectionPage = () => {
     }
   };
 
+  const refreshCameras = async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(device => device.kind === 'videoinput');
+      setAvailableCameras(videoDevices);
+      if (!selectedCameraId && videoDevices.length > 0) {
+        setSelectedCameraId(videoDevices[0].deviceId);
+      }
+    } catch (error) {
+      console.error('Camera enumeration error:', error);
+    }
+  };
+
+  const stopPreviewLoop = () => {
+    if (previewAnimationRef.current) {
+      cancelAnimationFrame(previewAnimationRef.current);
+      previewAnimationRef.current = null;
+    }
+    imageCaptureRef.current = null;
+  };
+
+  const startSnapshotLoop = (mediaStream) => {
+     // This logic is now called by the useEffect when useCanvasPreview is true
+     stopPreviewLoop();
+
+     // Check if ImageCapture is supported
+     if (!('ImageCapture' in window)) {
+        setCameraError('Live preview not supported. You can still capture images blindly.');
+        return;
+     }
+
+     const [track] = mediaStream.getVideoTracks();
+     if (!track) return;
+
+     try {
+       const imageCapture = new ImageCapture(track);
+       imageCaptureRef.current = imageCapture;
+       
+       const drawFrame = async () => {
+         if (!previewCanvasRef.current || !imageCaptureRef.current) return;
+         try {
+           const bitmap = await imageCapture.grabFrame();
+           const canvas = previewCanvasRef.current;
+           // Check if canvas still exists (user might have navigated away)
+           if (canvas) {
+               const ctx = canvas.getContext('2d');
+               canvas.width = bitmap.width;
+               canvas.height = bitmap.height;
+               ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+               if (!cameraReady) markCameraReady();
+           }
+         } catch (err) {
+           // Ignore insignificant errors during loop
+         }
+         previewAnimationRef.current = requestAnimationFrame(drawFrame);
+       };
+
+       drawFrame();
+     } catch (error) {
+       console.error('ImageCapture init error:', error);
+       setCameraError('Preview failed. Please check connection.');
+     }
+  };
+
   const handleSelectGoodClass = (className) => {
-    // Toggle: if clicking the same class, deselect it
     if (selectedGoodClass === className) {
       setSelectedGoodClass(null);
     } else {
-      // Select new class (stay on selection page)
       setSelectedGoodClass(className);
     }
   };
@@ -84,27 +195,92 @@ const InspectionPage = () => {
     }
   };
 
-  const startCamera = async () => {
+  const markCameraReady = () => {
+    if (readinessTimeoutRef.current) {
+      clearTimeout(readinessTimeoutRef.current);
+      readinessTimeoutRef.current = null;
+    }
+    setCameraReady(true);
+    setCameraError(null);
+  };
+
+  const startCamera = async (preferredCameraId, forceRestart = false) => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError('Camera API not supported. Use Upload mode.');
+      setMode('upload');
+      return;
+    }
+
+    if (cameraLoading) return;
+    if (stream && !forceRestart) return;
+
     try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        } 
-      });
+      setCameraLoading(true);
+      setCameraError(null);
+      setCameraReady(false);
+      setUseCanvasPreview(false); // Reset to standard video mode initially
+
+      // Stop existing stream if restarting
+      if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+      }
+      stopPreviewLoop();
+
+      const videoConstraints = {
+        width: { ideal: 640 },
+        height: { ideal: 480 }
+      };
+
+      if (preferredCameraId) {
+        videoConstraints.deviceId = { exact: preferredCameraId };
+      } else {
+        videoConstraints.facingMode = 'environment';
+      }
+
+      console.debug('[Camera] Requesting access...');
+      let mediaStream;
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ 
+          video: videoConstraints,
+          audio: false
+        });
+      } catch (err) {
+        console.warn('Constraint error, retrying with defaults', err);
+        mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
+
+      // NOTE: We do NOT attach srcObject here anymore.
+      // We just set the state. The useEffect will handle the attachment
+      // once the <video> element renders.
       setStream(mediaStream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
-        // Wait for video to be ready
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current.play();
+
+      // Handle stream ending unexpectedly
+      const [videoTrack] = mediaStream.getVideoTracks();
+      if (videoTrack) {
+        videoTrack.onended = () => {
+          setCameraError('Camera disconnected.');
+          setCameraReady(false);
+          stopPreviewLoop();
         };
       }
+
+      refreshCameras();
+
+      // Set a fallback timeout in case the video never plays
+      readinessTimeoutRef.current = setTimeout(() => {
+        if (!cameraReady) {
+            console.warn('[Camera] Timeout reached, forcing snapshot mode');
+            setUseCanvasPreview(true); // This will trigger the fallback effect
+        }
+      }, 8000);
+
     } catch (error) {
       console.error('Camera error:', error);
-      alert(`Camera access denied: ${error.message}\n\nPlease allow camera access or use Upload mode.`);
+      setCameraError(error.message || 'Unable to access camera');
+      alert(`Camera access failed: ${error.message}\n\nPlease ensure HTTPS is used or localhost.`);
       setMode('upload');
+    } finally {
+      setCameraLoading(false);
     }
   };
 
@@ -113,33 +289,51 @@ const InspectionPage = () => {
       stream.getTracks().forEach(track => track.stop());
       setStream(null);
     }
+    setCameraReady(false);
+    stopPreviewLoop();
+    if (readinessTimeoutRef.current) {
+      clearTimeout(readinessTimeoutRef.current);
+      readinessTimeoutRef.current = null;
+    }
   };
 
   const captureImage = () => {
-    const video = videoRef.current;
     const canvas = canvasRef.current;
-    
-    if (!video || !canvas) {
-      alert('Camera not ready');
-      return;
+    if (!canvas) {
+        // Create a temporary canvas if ref is missing
+        return;
     }
-    
-    if (video.videoWidth === 0 || video.videoHeight === 0) {
-      alert('Camera not initialized. Please wait a moment.');
-      return;
+
+    // Determine dimensions and source
+    let source = null;
+    let width = 0;
+    let height = 0;
+
+    if (useCanvasPreview && previewCanvasRef.current) {
+        source = previewCanvasRef.current;
+        width = source.width;
+        height = source.height;
+    } else if (videoRef.current) {
+        source = videoRef.current;
+        width = source.videoWidth;
+        height = source.videoHeight;
     }
-    
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
+
+    if (!source || width === 0 || height === 0) {
+        alert('Camera not ready for capture');
+        return;
+    }
+
+    canvas.width = width;
+    canvas.height = height;
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0);
-    
+    ctx.drawImage(source, 0, 0);
+
     canvas.toBlob(async (blob) => {
       if (!blob) {
         alert('Failed to capture image');
         return;
       }
-      
       setCapturedImage(blob);
       await classifyImage(blob);
     }, 'image/jpeg', 0.95);
@@ -158,12 +352,8 @@ const InspectionPage = () => {
     setResult(null);
     
     try {
-      // Ensure we have a valid blob
-      if (!imageBlob || !(imageBlob instanceof Blob || imageBlob instanceof File)) {
-        throw new Error('Invalid image data');
-      }
+      if (!imageBlob) throw new Error('Invalid image data');
       
-      // Create batch if first image
       let batchId = currentBatchId;
       if (!batchId) {
         const batch = await api.post('/batches', { 
@@ -171,14 +361,11 @@ const InspectionPage = () => {
         });
         batchId = batch.id;
         setCurrentBatchId(batchId);
-        
-        // Save selected good class to batch_metadata
         await api.post(`/batches/${batchId}/select-color`, {
           selectedGoodClass: selectedGoodClass
         });
       }
       
-      // Create form data and upload
       const formData = new FormData();
       formData.append('file', imageBlob, imageBlob.name || 'capture.jpg');
       
@@ -192,13 +379,9 @@ const InspectionPage = () => {
         }
       );
       
-      if (!uploadResponse.ok) {
-        const errorData = await uploadResponse.json().catch(() => ({}));
-        throw new Error(errorData.error || 'Classification failed');
-      }
+      if (!uploadResponse.ok) throw new Error('Classification failed');
       
       const classificationResult = await uploadResponse.json();
-      
       const finalResult = {
         ...classificationResult,
         selectedGoodClass,
@@ -210,7 +393,7 @@ const InspectionPage = () => {
       
     } catch (error) {
       console.error('Classification error:', error);
-      alert(`Classification failed: ${error.message}`);
+      alert(`Error: ${error.message}`);
     } finally {
       setClassifying(false);
     }
@@ -235,13 +418,14 @@ const InspectionPage = () => {
     }
   };
 
-  // Step 1: Select good class
+  // --- RENDER ---
+
   if (mode === 'select') {
     if (loading) {
       return (
         <div className="inspection-page">
           <h1>Loading...</h1>
-          <p>Connecting to YOLO inference service...</p>
+          <p>Connecting to inference service...</p>
         </div>
       );
     }
@@ -249,8 +433,7 @@ const InspectionPage = () => {
     return (
       <div className="inspection-page">
         <h1>Select Acceptable Cone Tip</h1>
-        <p>Choose which cone tip type should be classified as GOOD. All others will be REJECTED.</p>
-        <p className="model-info">Classes loaded from YOLO model (best.pt)</p>
+        <p>Choose which cone tip type is GOOD.</p>
         
         <div className="reference-selection">
           {references.map((ref) => (
@@ -262,94 +445,90 @@ const InspectionPage = () => {
               {ref.hasImage ? (
                 <img src={ref.path} alt={ref.class} />
               ) : (
-                <div className="placeholder-image">
-                  <span className="placeholder-icon">📷</span>
-                  <span className="placeholder-text">No reference image</span>
-                  <span className="placeholder-hint">Upload in References page</span>
-                </div>
+                <div className="placeholder-image">📷</div>
               )}
               <div className="reference-label">
                 <h3>{ref.class.replace(/_/g, ' ')}</h3>
                 <button className={selectedGoodClass === ref.class ? 'selected' : ''}>
-                  {selectedGoodClass === ref.class ? '✓ Selected as GOOD' : 'Select as GOOD'}
+                  {selectedGoodClass === ref.class ? '✓ Selected' : 'Select'}
                 </button>
               </div>
             </div>
           ))}
         </div>
         
-        {references.length === 0 && (
-          <div className="empty-state">
-            <p>⚠️ No model classes found.</p>
-            <p>Make sure the YOLO inference service is running:</p>
-            <code>cd inference-service && python http_server.py</code>
-          </div>
-        )}
-        
         {selectedGoodClass && (
           <div className="confirm-selection">
             <button onClick={handleConfirmSelection} className="btn-confirm">
-              ✓ Confirm Selection & Start Inspection
+              ✓ Start Inspection
             </button>
-            <p className="selection-info">
-              Selected: <strong>{selectedGoodClass.replace(/_/g, ' ')}</strong> as GOOD
-            </p>
           </div>
         )}
       </div>
     );
   }
 
-  // Step 2: Camera or Upload mode
   return (
     <div className="inspection-page">
       <div className="inspection-header">
         <div>
-          <h1>Cone Tip Inspection</h1>
-          <p>
-            Selected GOOD class: <strong>{selectedGoodClass?.replace(/_/g, ' ')}</strong>
-            <button onClick={changeGoodClass} className="btn-secondary">Change</button>
-          </p>
-          <p>Inspected: {batchResults.length} | Good: {batchResults.filter(r => r.classification === 'good').length} | Reject: {batchResults.filter(r => r.classification === 'reject').length}</p>
+          <h1>Inspection Mode</h1>
+          <p>Target: <strong>{selectedGoodClass?.replace(/_/g, ' ')}</strong> <button onClick={changeGoodClass} className="btn-secondary">Change</button></p>
         </div>
-        
         <div className="mode-toggle">
-          <button 
-            onClick={() => { setMode('camera'); startCamera(); }}
-            className={mode === 'camera' ? 'active' : ''}
-          >
-            📷 Camera
-          </button>
-          <button 
-            onClick={() => { setMode('upload'); stopCamera(); }}
-            className={mode === 'upload' ? 'active' : ''}
-          >
-            📁 Upload
-          </button>
+          <button onClick={() => { setMode('camera'); startCamera(); }} className={mode === 'camera' ? 'active' : ''}>📷 Camera</button>
+          <button onClick={() => { setMode('upload'); stopCamera(); }} className={mode === 'upload' ? 'active' : ''}>📁 Upload</button>
         </div>
       </div>
 
       <div className="inspection-content">
         {mode === 'camera' && (
           <div className="camera-section">
-            {!stream && (
-              <button onClick={startCamera} className="btn-large">
-                Start Camera
+            <div className="camera-toolbar">
+                <select 
+                    value={selectedCameraId} 
+                    onChange={(e) => setSelectedCameraId(e.target.value)}
+                    disabled={availableCameras.length === 0}
+                >
+                    {availableCameras.map(c => <option key={c.deviceId} value={c.deviceId}>{c.label || c.deviceId.slice(0,5)}</option>)}
+                </select>
+                <button onClick={refreshCameras}>🔄</button>
+            </div>
+
+            {cameraError && <p className="camera-error">⚠️ {cameraError}</p>}
+
+            {!stream ? (
+              <button onClick={() => startCamera(selectedCameraId, true)} className="btn-large" disabled={cameraLoading}>
+                {cameraLoading ? 'Starting...' : 'Start Camera'}
               </button>
-            )}
-            
-            {stream && (
+            ) : (
               <>
-                <video 
-                  ref={videoRef} 
-                  autoPlay 
-                  playsInline
-                  className="camera-preview"
-                />
+                <div className="video-container" style={{ position: 'relative', minHeight: '300px', backgroundColor: '#000' }}>
+                    {/* VIDEO MODE */}
+                    {!useCanvasPreview && (
+                        <video 
+                            ref={videoRef} 
+                            autoPlay 
+                            playsInline
+                            muted
+                            style={{ width: '100%', maxWidth: '640px' }}
+                        />
+                    )}
+
+                    {/* CANVAS FALLBACK MODE */}
+                    {useCanvasPreview && (
+                        <canvas 
+                            ref={previewCanvasRef}
+                            className="camera-preview"
+                            style={{ width: '100%', maxWidth: '640px' }}
+                        />
+                    )}
+                </div>
+
                 <canvas ref={canvasRef} style={{ display: 'none' }} />
                 
                 {!capturedImage && (
-                  <button onClick={captureImage} className="btn-capture">
+                  <button onClick={captureImage} className="btn-capture" disabled={!cameraReady && !useCanvasPreview}>
                     📸 Capture
                   </button>
                 )}
@@ -359,78 +538,20 @@ const InspectionPage = () => {
         )}
 
         {mode === 'upload' && !capturedImage && (
-          <div className="upload-section">
-            <label htmlFor="imageUpload" className="upload-label">
-              <div className="upload-box">
-                <p>📁 Click to upload image</p>
-                <p className="upload-hint">or drag and drop</p>
-              </div>
-            </label>
-            <input
-              id="imageUpload"
-              type="file"
-              accept="image/*"
-              onChange={handleFileUpload}
-              style={{ display: 'none' }}
-            />
-          </div>
+           <div className="upload-section">
+             <input type="file" onChange={handleFileUpload} accept="image/*" />
+             <p>Select an image to inspect</p>
+           </div>
         )}
 
-        {capturedImage && (
-          <div className="result-section">
-            <div className="captured-preview">
-              <img src={URL.createObjectURL(capturedImage)} alt="Captured" />
-            </div>
-            
-            {classifying && (
-              <div className="classifying">
-                <div className="spinner"></div>
-                <p>Classifying...</p>
-              </div>
-            )}
-            
-            {result && (
-              <div className={`result-card ${result.classification}`}>
-                <h2>{result.classification.toUpperCase()}</h2>
-                <div className="result-details">
-                  <p><strong>Detected:</strong> {result.predicted_class?.replace(/_/g, ' ')}</p>
-                  <p><strong>Confidence:</strong> {(result.confidence * 100).toFixed(1)}%</p>
-                  <p><strong>Time:</strong> {result.inference_time_ms}ms</p>
-                </div>
-                
-                <div className="result-actions">
-                  <button onClick={resetCapture} className="btn-secondary">
-                    {mode === 'camera' ? 'Capture Next' : 'Upload Next'}
-                  </button>
-                </div>
-              </div>
-            )}
+        {capturedImage && result && (
+          <div className={`result-card ${result.classification}`}>
+            <h2>{result.classification.toUpperCase()}</h2>
+            <p>Confidence: {(result.confidence * 100).toFixed(1)}%</p>
+            <button onClick={resetCapture} className="btn-secondary">Next</button>
           </div>
         )}
       </div>
-
-      {batchResults.length > 0 && (
-        <div className="batch-summary-bottom">
-          <h3>Summary</h3>
-          <div className="summary-stats-horizontal">
-            <div className="stat-item">
-              <span className="stat-value">{batchResults.length}</span>
-              <span className="stat-label">TOTAL</span>
-            </div>
-            <div className="stat-item good">
-              <span className="stat-value">{batchResults.filter(r => r.classification === 'good').length}</span>
-              <span className="stat-label">GOOD</span>
-            </div>
-            <div className="stat-item reject">
-              <span className="stat-value">{batchResults.filter(r => r.classification === 'reject').length}</span>
-              <span className="stat-label">REJECT</span>
-            </div>
-          </div>
-          <button onClick={viewBatch} className="btn-view-results-bottom">
-            View Full Results
-          </button>
-        </div>
-      )}
     </div>
   );
 };
