@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../utils/api.js';
 import { formatLocalDateTime } from '../utils/dateFormat.js';
+import { CAMERA_CONFIG } from '../utils/cameraConfig.js';
 
 const InspectionPage = () => {
   const [references, setReferences] = useState([]);
@@ -20,6 +21,7 @@ const InspectionPage = () => {
   const [currentBatchId, setCurrentBatchId] = useState(null);
   const [loading, setLoading] = useState(true);
   const [useCanvasPreview, setUseCanvasPreview] = useState(false);
+  const [videoDimensions, setVideoDimensions] = useState({ width: 0, height: 0 });
   
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -29,6 +31,58 @@ const InspectionPage = () => {
   const imageCaptureRef = useRef(null);
   
   const navigate = useNavigate();
+
+  // --- CROP OVERLAY COMPONENT ---
+  // Visual indicator showing the rectangle region that will be captured
+  const CropOverlay = ({ sourceWidth, sourceHeight }) => {
+    if (!sourceWidth || !sourceHeight || sourceWidth === 0 || sourceHeight === 0) return null;
+    
+    // Calculate crop dimensions and position (same logic as captureImage)
+    let cropWidth = CAMERA_CONFIG.CROP_WIDTH;
+    let cropHeight = CAMERA_CONFIG.CROP_HEIGHT;
+    
+    // Clamp to valid ranges
+    if (cropWidth < CAMERA_CONFIG.MIN_CROP_WIDTH) cropWidth = CAMERA_CONFIG.MIN_CROP_WIDTH;
+    if (cropHeight < CAMERA_CONFIG.MIN_CROP_HEIGHT) cropHeight = CAMERA_CONFIG.MIN_CROP_HEIGHT;
+    if (cropWidth > CAMERA_CONFIG.MAX_CROP_WIDTH) cropWidth = CAMERA_CONFIG.MAX_CROP_WIDTH;
+    if (cropHeight > CAMERA_CONFIG.MAX_CROP_HEIGHT) cropHeight = CAMERA_CONFIG.MAX_CROP_HEIGHT;
+    
+    // Ensure crop doesn't exceed source dimensions
+    if (cropWidth > sourceWidth) cropWidth = sourceWidth;
+    if (cropHeight > sourceHeight) cropHeight = sourceHeight;
+    
+    const cropX = (sourceWidth - cropWidth) / 2;
+    const cropY = (sourceHeight - cropHeight) / 2;
+    
+    // Calculate overlay position as percentage (for responsive display)
+    const leftPercent = (cropX / sourceWidth) * 100;
+    const topPercent = (cropY / sourceHeight) * 100;
+    const widthPercent = (cropWidth / sourceWidth) * 100;
+    const heightPercent = (cropHeight / sourceHeight) * 100;
+    
+    return (
+      <div
+        style={{
+          position: 'absolute',
+          left: `${leftPercent}%`,
+          top: `${topPercent}%`,
+          width: `${widthPercent}%`,
+          height: `${heightPercent}%`,
+          border: '3px solid #00ff00',
+          boxSizing: 'border-box',
+          pointerEvents: 'none',
+          boxShadow: '0 0 10px rgba(0, 255, 0, 0.5)',
+          zIndex: 10
+        }}
+      >
+        {/* Corner markers for better visibility */}
+        <div style={{ position: 'absolute', top: -2, left: -2, width: '20px', height: '20px', borderTop: '3px solid #00ff00', borderLeft: '3px solid #00ff00' }} />
+        <div style={{ position: 'absolute', top: -2, right: -2, width: '20px', height: '20px', borderTop: '3px solid #00ff00', borderRight: '3px solid #00ff00' }} />
+        <div style={{ position: 'absolute', bottom: -2, left: -2, width: '20px', height: '20px', borderBottom: '3px solid #00ff00', borderLeft: '3px solid #00ff00' }} />
+        <div style={{ position: 'absolute', bottom: -2, right: -2, width: '20px', height: '20px', borderBottom: '3px solid #00ff00', borderRight: '3px solid #00ff00' }} />
+      </div>
+    );
+  };
 
   // --- INITIALIZATION ---
   useEffect(() => {
@@ -73,6 +127,14 @@ const InspectionPage = () => {
       videoEl.play()
         .then(() => {
             console.debug('[Camera] Video playing successfully');
+            // Update dimensions when video is ready
+            const updateDimensions = () => {
+              if (videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+                setVideoDimensions({ width: videoEl.videoWidth, height: videoEl.videoHeight });
+              }
+            };
+            videoEl.addEventListener('loadedmetadata', updateDimensions);
+            updateDimensions();
             markCameraReady();
         })
         .catch(err => {
@@ -166,6 +228,8 @@ const InspectionPage = () => {
                canvas.width = bitmap.width;
                canvas.height = bitmap.height;
                ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+               // Update dimensions for overlay
+               setVideoDimensions({ width: bitmap.width, height: bitmap.height });
                if (!cameraReady) markCameraReady();
            }
          } catch (err) {
@@ -306,34 +370,81 @@ const InspectionPage = () => {
 
     // Determine dimensions and source
     let source = null;
-    let width = 0;
-    let height = 0;
+    let sourceWidth = 0;
+    let sourceHeight = 0;
 
     if (useCanvasPreview && previewCanvasRef.current) {
         source = previewCanvasRef.current;
-        width = source.width;
-        height = source.height;
+        sourceWidth = source.width;
+        sourceHeight = source.height;
     } else if (videoRef.current) {
         source = videoRef.current;
-        width = source.videoWidth;
-        height = source.videoHeight;
+        sourceWidth = source.videoWidth;
+        sourceHeight = source.videoHeight;
     }
 
-    if (!source || width === 0 || height === 0) {
+    if (!source || sourceWidth === 0 || sourceHeight === 0) {
         alert('Camera not ready for capture');
         return;
     }
 
-    canvas.width = width;
-    canvas.height = height;
+    // Calculate crop dimensions and position (center rectangle)
+    let cropWidth = CAMERA_CONFIG.CROP_WIDTH;
+    let cropHeight = CAMERA_CONFIG.CROP_HEIGHT;
+    
+    // Clamp crop dimensions to valid range
+    if (cropWidth < CAMERA_CONFIG.MIN_CROP_WIDTH) {
+      console.warn(`[Camera] Crop width ${cropWidth} is too small, using minimum ${CAMERA_CONFIG.MIN_CROP_WIDTH}`);
+      cropWidth = CAMERA_CONFIG.MIN_CROP_WIDTH;
+    }
+    if (cropHeight < CAMERA_CONFIG.MIN_CROP_HEIGHT) {
+      console.warn(`[Camera] Crop height ${cropHeight} is too small, using minimum ${CAMERA_CONFIG.MIN_CROP_HEIGHT}`);
+      cropHeight = CAMERA_CONFIG.MIN_CROP_HEIGHT;
+    }
+    if (cropWidth > CAMERA_CONFIG.MAX_CROP_WIDTH) {
+      console.warn(`[Camera] Crop width ${cropWidth} is too large, using maximum ${CAMERA_CONFIG.MAX_CROP_WIDTH}`);
+      cropWidth = CAMERA_CONFIG.MAX_CROP_WIDTH;
+    }
+    if (cropHeight > CAMERA_CONFIG.MAX_CROP_HEIGHT) {
+      console.warn(`[Camera] Crop height ${cropHeight} is too large, using maximum ${CAMERA_CONFIG.MAX_CROP_HEIGHT}`);
+      cropHeight = CAMERA_CONFIG.MAX_CROP_HEIGHT;
+    }
+    
+    // Ensure crop dimensions don't exceed source dimensions
+    if (cropWidth > sourceWidth) {
+      console.warn(`[Camera] Crop width ${cropWidth} exceeds image width ${sourceWidth}, using ${sourceWidth}`);
+      cropWidth = sourceWidth;
+    }
+    if (cropHeight > sourceHeight) {
+      console.warn(`[Camera] Crop height ${cropHeight} exceeds image height ${sourceHeight}, using ${sourceHeight}`);
+      cropHeight = sourceHeight;
+    }
+
+    // Calculate center position
+    const cropX = Math.floor((sourceWidth - cropWidth) / 2);
+    const cropY = Math.floor((sourceHeight - cropHeight) / 2);
+
+    console.debug(`[Camera] Capturing crop: ${cropWidth}x${cropHeight} from center of ${sourceWidth}x${sourceHeight} image`);
+    console.debug(`[Camera] Crop position: (${cropX}, ${cropY})`);
+
+    // Set canvas to crop dimensions and draw the cropped region
+    canvas.width = cropWidth;
+    canvas.height = cropHeight;
     const ctx = canvas.getContext('2d');
-    ctx.drawImage(source, 0, 0);
+    
+    // Draw the cropped rectangle from the center of the source
+    ctx.drawImage(
+      source,
+      cropX, cropY, cropWidth, cropHeight,  // Source rectangle (crop from center)
+      0, 0, cropWidth, cropHeight            // Destination rectangle (full canvas)
+    );
 
     canvas.toBlob(async (blob) => {
       if (!blob) {
         alert('Failed to capture image');
         return;
       }
+      console.debug(`[Camera] Cropped image captured: ${cropWidth}x${cropHeight} pixels, blob size: ${blob.size} bytes`);
       setCapturedImage(blob);
       await classifyImage(blob);
     }, 'image/jpeg', 0.95);
@@ -503,7 +614,7 @@ const InspectionPage = () => {
               </button>
             ) : (
               <>
-                <div className="video-container" style={{ position: 'relative', minHeight: '300px', backgroundColor: '#000' }}>
+                <div className="video-container" style={{ position: 'relative', minHeight: '300px', backgroundColor: '#000', display: 'inline-block' }}>
                     {/* VIDEO MODE */}
                     {!useCanvasPreview && (
                         <video 
@@ -511,7 +622,7 @@ const InspectionPage = () => {
                             autoPlay 
                             playsInline
                             muted
-                            style={{ width: '100%', maxWidth: '640px' }}
+                            style={{ width: '100%', maxWidth: '640px', display: 'block' }}
                         />
                     )}
 
@@ -520,8 +631,16 @@ const InspectionPage = () => {
                         <canvas 
                             ref={previewCanvasRef}
                             className="camera-preview"
-                            style={{ width: '100%', maxWidth: '640px' }}
+                            style={{ width: '100%', maxWidth: '640px', display: 'block' }}
                         />
+                    )}
+                    
+                    {/* CROP AREA OVERLAY - Shows the rectangle region that will be captured */}
+                    {videoDimensions.width > 0 && videoDimensions.height > 0 && (
+                      <CropOverlay 
+                        sourceWidth={videoDimensions.width}
+                        sourceHeight={videoDimensions.height}
+                      />
                     )}
                 </div>
 
